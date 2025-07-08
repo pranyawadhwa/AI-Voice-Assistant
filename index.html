@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Voice Assistant</title>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;padding:0;font-family:system-ui,Roboto,Arial,sans-serif;background:#f4f4f8;display:flex;justify-content:center;align-items:flex-start;min-height:100vh}
+    #assistant{width:95%;max-width:720px;background:#fff;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.12);margin:2rem 0;padding:1.25rem}
+    #messages{height:320px;overflow-y:auto;border:1px solid #ddd;border-radius:8px;padding:.75rem;background:#fafafa}
+    .message{margin:.5rem 0;line-height:1.45}
+    .assistant{font-weight:600;color:#111}
+    .user{text-align:right;color:#555}
+    #controls,#docArea,#savedList{margin-top:1rem}
+    button{padding:.55rem 1.1rem;border:none;border-radius:6px;cursor:pointer;box-shadow:0 3px 6px rgba(0,0,0,.1);font-size:1rem;transition:transform .1s}
+    button:active{transform:scale(.97)}
+    #btnRead,#readSelected,#saveDoc{background:#4e89ff;color:#fff}
+    #btnNew{background:#22c55e;color:#fff;margin-left:.75rem}
+    #deleteSelected{background:#ef4444;color:#fff;margin-left:.5rem}
+    textarea{width:100%;border:1px solid #ccc;border-radius:8px;padding:.75rem;font-size:1rem;resize:vertical;min-height:220px}
+    select{width:100%;padding:.5rem;border-radius:6px;border:1px solid #bbb}
+  </style>
+</head>
+<body>
+  <div id="assistant">
+    <h2>AI Voice Assistant</h2>
+    <div id="messages"></div>
+
+    <div id="controls">
+      <button id="btnRead">📂 Read Saved Document</button>
+      <button id="btnNew">📝 Create New Document</button>
+      <button id="btnVoiceDelete">🗑 Delete Document</button>
+    </div>
+
+    <div id="savedList" hidden>
+      <label>Select a document:</label>
+      <select id="savedSelect"></select>
+      <button id="readSelected">🔊 Read Aloud</button>
+      <button id="deleteSelected">🗑 Delete</button>
+    </div>
+
+    <div id="docArea" hidden>
+      <label>Your document (voice‑typed):</label>
+      <textarea id="docContent" placeholder="Start speaking – your words will appear here…"></textarea>
+      <button id="saveDoc">💾 Save Document</button>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const synth = window.speechSynthesis;
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const recog = SpeechRecognition ? new SpeechRecognition() : null;
+      if (!recog) { alert('Web Speech API not supported. Use Chrome or Edge.'); return; }
+      recog.lang = 'en-US'; recog.continuous = false; recog.interimResults = false;
+      let isListening = false;
+      function listen() { if (isListening) return; try { recog.start(); isListening = true; } catch(e){} }
+      function pause() { if (!isListening) return; try { recog.abort(); } catch(e){} isListening = false; }
+      function speak(text, cb) {
+        pause();
+        const ut = new SpeechSynthesisUtterance(text);
+        ut.lang = 'en-US'; ut.rate = 1;
+        ut.onend = () => cb ? cb() : resumeIfNeeded();
+        synth.speak(ut);
+      }
+      function resumeIfNeeded() {
+        if (state.awaitingTitle || state.awaitingDeleteConfirm || state.awaitingDeleteSelect || state.awaitingReadMethod || state.awaitingReadSelection || state.mode === 'creating' || state.mode === 'reading') listen();
+      }
+
+      const el = id => document.getElementById(id);
+      const messages = el('messages');
+      const say = (txt, cb) => { addMsg('assistant', txt); speak(txt, cb); };
+      const user = (txt) => addMsg('user', txt);
+      function addMsg(role, txt) {
+        const d = document.createElement('div');
+        d.className = 'message ' + role;
+        d.textContent = txt;
+        messages.appendChild(d);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      const loadDocs = () => JSON.parse(localStorage.getItem('docs') || '[]');
+      const saveDocs = d => localStorage.setItem('docs', JSON.stringify(d));
+      function refreshDocList() {
+        const docs = loadDocs();
+        const sel = el('savedSelect'); sel.innerHTML = '';
+        docs.forEach((d, i) => {
+          const o = document.createElement('option');
+          o.value = i;
+          o.textContent = d.title || ('Untitled ' + (i + 1));
+          sel.appendChild(o);
+        });
+      }
+
+      const state = {
+        mode: 'idle',
+        awaitingTitle: false,
+        pendingContent: '',
+        awaitingDeleteSelect: false,
+        awaitingDeleteConfirm: false,
+        deleteIdx: null,
+        awaitingReadMethod: false,
+        awaitingReadSelection: false
+      };
+
+      function toReadingMode() {
+        state.mode = 'reading';
+        state.awaitingReadMethod = true;
+        el('savedList').hidden = false;
+        el('docArea').hidden = true;
+        refreshDocList();
+        say('Would you like to select a document from the list, or say its number?', listen);
+      }
+
+      function toCreatingMode() {
+        state.mode = 'creating';
+        el('savedList').hidden = true;
+        el('docArea').hidden = false;
+        el('docContent').value = '';
+        say('Start dictating your document. Say "save document" when done.', listen);
+      }
+
+      function voiceDeleteStart() {
+        state.awaitingDeleteSelect = true;
+        el('savedList').hidden = false;
+        el('docArea').hidden = true;
+        refreshDocList();
+        const docs = loadDocs();
+        if (!docs.length) { say('No documents to delete.', listen); return; }
+        const names = docs.map((d, i) => `Document ${i + 1}: ${d.title || 'Untitled'}`).join('. ');
+        say('Say the number of the document to delete. ' + names, listen);
+      }
+
+      function handleDeleteSelection(text) {
+        const numMatch = text.match(/\d+/);
+        if (!numMatch) return say('Please say a number.', listen);
+        const idx = parseInt(numMatch[0], 10) - 1;
+        const docs = loadDocs();
+        if (idx < 0 || idx >= docs.length) return say('Invalid number.', listen);
+        state.deleteIdx = idx;
+        state.awaitingDeleteSelect = false;
+        state.awaitingDeleteConfirm = true;
+        say(`Are you sure you want to delete "${docs[idx].title}"? Say yes or no.`, listen);
+      }
+
+      function handleDeleteConfirm(text) {
+        if (/yes|confirm/.test(text)) {
+          const docs = loadDocs();
+          docs.splice(state.deleteIdx, 1);
+          saveDocs(docs);
+          refreshDocList();
+          say('Document deleted.', listen);
+        } else {
+          say('Cancelled.', listen);
+        }
+        state.awaitingDeleteConfirm = false;
+        state.deleteIdx = null;
+      }
+
+      function prepareSave() {
+        const content = el('docContent').value.trim();
+        if (!content) return say('Please dictate something first.', listen);
+        state.pendingContent = content;
+        state.awaitingTitle = true;
+        say('What title should I give this document? Say "skip" to use default.', listen);
+      }
+
+      function finalizeSave(titleSpoken) {
+        let title = /\bskip\b/i.test(titleSpoken) ? '' : titleSpoken.trim();
+        const docs = loadDocs();
+        docs.push({ title: title || ('Document ' + (docs.length + 1)), content: state.pendingContent });
+        saveDocs(docs); refreshDocList();
+        state.awaitingTitle = false; state.mode = 'idle'; state.pendingContent = '';
+        say('Document saved. What next?', listen);
+      }
+
+      function btnDeleteSelected() { voiceDeleteStart(); }
+      function btnReadSelected() {
+        const idx = el('savedSelect').value;
+        const doc = loadDocs()[idx];
+        if (!doc) return say('Document not found.', listen);
+        say('Reading ' + (doc.title || 'your document') + '.', () => speak(doc.content, () => say('Done reading.', listen)));
+      }
+
+      function detectIntent(tx) {
+        if (state.awaitingTitle) return 'title';
+        if (state.awaitingDeleteSelect) return 'delete-select';
+        if (state.awaitingDeleteConfirm) return 'delete-confirm';
+        if (/read|open.*document|saved document/.test(tx)) return 'read-doc';
+        if (/new|create|add.*document/.test(tx)) return 'new-doc';
+        if (state.mode === 'creating' && /\bsave\b/.test(tx)) return 'save-doc';
+        if (/delete.*document/.test(tx)) return 'start-delete';
+        return null;
+      }
+
+      recog.onresult = e => { isListening = false; const txt = e.results[0][0].transcript.trim(); user(txt); handleInput(txt.toLowerCase()); };
+      recog.onend = () => { isListening = false; resumeIfNeeded(); };
+
+      function handleInput(text) {
+        switch (detectIntent(text)) {
+          case 'read-doc': return toReadingMode();
+          case 'new-doc': return toCreatingMode();
+          case 'save-doc': return prepareSave();
+          case 'title': return finalizeSave(text);
+          case 'start-delete': return voiceDeleteStart();
+          case 'delete-select': return handleDeleteSelection(text);
+          case 'delete-confirm': return handleDeleteConfirm(text);
+        }
+
+        if (state.awaitingReadMethod) {
+          state.awaitingReadMethod = false;
+          if (/say|voice|number/i.test(text)) {
+            state.awaitingReadSelection = true;
+            const docs = loadDocs();
+            if (!docs.length) return say('No documents found.', listen);
+            const names = docs.map((d, i) => `Document ${i + 1}: ${d.title}`).join('. ');
+            return say('Say the document number. ' + names, listen);
+          } else if (/select|dropdown/.test(text)) {
+            return say('Please choose from the list and click read aloud.', listen);
+          } else {
+            state.awaitingReadMethod = true;
+            return say('Didn\'t get that. Say "number" or "select from list".', listen);
+          }
+        }
+
+        if (state.awaitingReadSelection) {
+          const docs = loadDocs();
+          const numMatch = text.match(/\d+/);
+          if (numMatch && docs[numMatch[0] - 1]) {
+            const doc = docs[numMatch[0] - 1];
+            state.awaitingReadSelection = false;
+            return say('Reading ' + (doc.title || 'your document') + '.', () => speak(doc.content, () => say('Done reading.', listen)));
+          }
+          const doc = docs.find(d => d.title.toLowerCase() === text.trim());
+          if (doc) {
+            state.awaitingReadSelection = false;
+            return say('Reading ' + (doc.title || 'your document') + '.', () => speak(doc.content, () => say('Done reading.', listen)));
+          }
+          return say('Document not found. Say its number or exact title.', listen);
+        }
+
+        if (state.mode === 'creating') {
+          el('docContent').value += text + ' ';
+        } else {
+          say('Say "create new document", "read saved document", or "delete document".', listen);
+        }
+      }
+
+      el('btnRead').onclick = toReadingMode;
+      el('btnNew').onclick = toCreatingMode;
+      el('saveDoc').onclick = prepareSave;
+      el('readSelected').onclick = btnReadSelected;
+      el('deleteSelected').onclick = btnDeleteSelected;
+      el('btnVoiceDelete').onclick = voiceDeleteStart;
+
+      say('Hi! Say "create new document", "read document", or "delete document".', listen);
+    })();
+  </script>
+</body>
+</html>
